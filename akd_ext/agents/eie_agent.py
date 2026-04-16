@@ -9,13 +9,21 @@ Public API:
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Literal
 
-from agents import HostedMCPTool
+from agents import HostedMCPTool, function_tool
 from pydantic import Field
 
 from akd_ext._types import OpenAITool
+from akd_ext.tools.get_place import GetPlaceTool, GetPlaceToolInputSchema
+from akd_ext.tools.set_datetime import SetDatetimeTool, SetDatetimeToolInputSchema
+from akd_ext.tools.collections_rag import CollectionsRAGTool, CollectionsRAGToolInputSchema, CollectionsResult
+from akd_ext.tools.stac_search import STACSearchTool, STACSearchToolInputSchema
+from akd_ext.tools.stats import StatsTool, StatsToolInputSchema
+from akd_ext.tools.viz import VizTool, VizToolInputSchema
+from akd_ext.tools.utils import is_cmr_backed
 
 from akd._base import (
     InputSchema,
@@ -127,31 +135,210 @@ The current date is {now}.
 # -----------------------------------------------------------------------------
 
 
-def get_default_eie_tools() -> list[OpenAITool]:
-    """Default EIE MCP tools from FastMCP cloud."""
-    return [
-        HostedMCPTool(
-            tool_config={
-                "type": "mcp",
-                "server_label": "EIE_MCP_Server",
-                "allowed_tools": [
-                    "set_datetime_tool",
-                    "get_place_tool",
-                    "collections_rag_tool",
-                    "stac_search_tool",
-                    "stats_tool",
-                    "viz_tool",
-                ],
-                "require_approval": "never",
-                "server_description": "EIE tools for earth science data exploration",
-                "server_url": os.environ.get(
-                    "EIE_MCP_URL",
-                    "https://lesser-fuchsia-lamprey.fastmcp.app/mcp",
-                ),
-                "authorization": os.environ.get("EIE_MCP_KEY"),
+def _make_local_tools() -> list:
+    """Create all 6 EIE tools locally with shared state.
+
+    Mirrors the eie-llm-backend's LangGraph pattern: tools read/write to
+    shared state so the LLM only passes minimal arguments (query, place name,
+    collection selection).  Large data (geometry, items, collection metadata)
+    flows through state and never bloats the LLM context.
+
+    Tool logic is reused from the existing tool classes — these wrappers
+    only handle state management and geometry simplification.
+    """
+    _state: dict[str, Any] = {
+        # Mirrors EIEState from eie-llm-backend
+        "datetime_range": None,
+        "place_result": None,           # PlaceResult: {place, bbox, geometry}
+        "collections_result": None,     # CollectionsResult: {collections, matches}
+        "stac_result": None,            # StacSearchResult: {items, item_ids}
+        "stats_result": None,           # StatsToolOutputSchema
+        "viz_result": None,             # VizToolOutputSchema
+        "selected_collection_id": None,
+        "selected_variable": None,
+        "collection_metadata": None,    # full STAC JSON (not in backend state, but needed for stateless tools)
+    }
+
+    # Reuse existing tool instances
+    _datetime_tool = SetDatetimeTool()
+    _place_tool = GetPlaceTool()
+    _rag_tool = CollectionsRAGTool()
+    _stac_tool = STACSearchTool()
+    _stats_tool = StatsTool()
+    _viz_tool = VizTool()
+
+    # ── set_datetime_tool ───────────────────────────────────────────
+
+    @function_tool(name_override="set_datetime_tool")
+    async def set_datetime_tool(value: str) -> str:
+        """Validate and normalize an ISO-8601 datetime range.
+
+        Args:
+            value: ISO-8601 range 'YYYY-MM-DD/YYYY-MM-DD'
+        """
+        result = await _datetime_tool._arun(SetDatetimeToolInputSchema(value=value))
+        if result.datetime:
+            _state["datetime_range"] = result.datetime
+        return result.model_dump()
+
+    # ── get_place_tool ──────────────────────────────────────────────
+
+    @function_tool(name_override="get_place_tool")
+    async def get_place_tool(query: str) -> str:
+        """Resolve a place name to a bounding box and geometry via geocoding.
+
+        Args:
+            query: A place name or location (e.g. 'California', 'Houston TX')
+        """
+        result = await _place_tool._arun(GetPlaceToolInputSchema(query=query))
+
+        # Store full place_result in state (geometry never shown to LLM)
+        _state["place_result"] = result
+
+        # Replace full geometry with bbox polygon for the LLM (~100 tokens instead of 10K+)
+        bbox_geom = None
+        if result.bbox:
+            w, s, e, n = result.bbox
+            bbox_geom = {
+                "type": "Polygon",
+                "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]],
             }
-        ),
-    ]
+
+        return json.dumps({
+            "place": result.place,
+            "bbox": result.bbox,
+            "geometry": bbox_geom,
+            "error": result.error,
+        })
+
+    # ── collections_rag_tool ────────────────────────────────────────
+
+    @function_tool(name_override="collections_rag_tool")
+    async def collections_rag_tool(query: str, top_k: int = 5) -> str:
+        """Search for relevant STAC collections using semantic search.
+        Reads bbox and datetime_range from previous tool calls automatically.
+
+        Args:
+            query: Data description (e.g. 'NO2 air quality', 'methane emissions')
+            top_k: Number of results to return (default 5)
+        """
+        place_result = _state.get("place_result")
+        result = await _rag_tool._arun(CollectionsRAGToolInputSchema(
+            query=query,
+            top_k=top_k,
+            bbox=place_result.bbox if place_result else None,
+            datetime_range=_state.get("datetime_range"),
+        ))
+        _state["collections_result"] = result
+        return result.model_dump()
+
+    # ── stac_search_tool ────────────────────────────────────────────
+
+    @function_tool(name_override="stac_search_tool")
+    async def stac_search_tool(collection_id: str, limit: int = 15) -> str:
+        """Search STAC catalog for COG items. Reads bbox and datetime from state.
+
+        Args:
+            collection_id: The collection ID to search (from collections_rag results)
+            limit: Maximum number of items to return (default 15)
+        """
+        place_result = _state.get("place_result")
+        datetime_range = _state.get("datetime_range")
+        if not place_result or not place_result.bbox:
+            return json.dumps({"error": "No bbox — run get_place_tool first"})
+        if not datetime_range:
+            return json.dumps({"error": "No datetime — run set_datetime_tool first"})
+
+        _state["selected_collection_id"] = collection_id
+
+        # Look up full collection metadata from collections_rag enrichment (no extra HTTP call)
+        collections_result = _state.get("collections_result")
+        if collections_result:
+            match = next((m for m in collections_result.matches if m.id == collection_id), None)
+            if match:
+                _state["collection_metadata"] = match.collection_metadata
+
+        result = await _stac_tool._arun(STACSearchToolInputSchema(
+            collections=[collection_id],
+            bbox=place_result.bbox,
+            datetime=datetime_range,
+            limit=limit,
+        ))
+
+        _state["stac_result"] = result
+        return result.model_dump()
+
+    # ── stats_tool ──────────────────────────────────────────────────
+
+    @function_tool(name_override="stats_tool")
+    async def stats_tool(selected_variable: str | None = None) -> str:
+        """Fetch raster zonal statistics. Reads geometry, items, and collection info from state.
+
+        Args:
+            selected_variable: Variable name for CMR collections (optional, from available_variables)
+        """
+        if selected_variable:
+            _state["selected_variable"] = selected_variable
+
+        place_result = _state.get("place_result")
+        if not place_result or not place_result.geometry:
+            return json.dumps({"error": "No geometry — run get_place_tool first"})
+
+        stac_result = _state.get("stac_result")
+        items = (
+            [{"url": item.asset_url, "id": item.id, "datetime": item.datetime}
+             for item in stac_result.items if item.asset_url]
+            if stac_result else None
+        )
+
+        logger.info(f"Geometry passed to stats tool: {place_result.geometry}")
+
+        result = await _stats_tool._arun(StatsToolInputSchema(
+            geometry=place_result.geometry,
+            items=items,
+            collection_id=_state.get("selected_collection_id"),
+            collection_metadata=_state.get("collection_metadata"),
+            datetime_range=_state.get("datetime_range"),
+            selected_variable=_state.get("selected_variable"),
+        ))
+        _state["stats_result"] = result
+        return result.model_dump()
+
+    # ── viz_tool ────────────────────────────────────────────────────
+
+    @function_tool(name_override="viz_tool")
+    async def viz_tool(selected_variable: str | None = None) -> str:
+        """Build raster tile URLs for visualization. Reads items and collection info from state.
+
+        Args:
+            selected_variable: Variable name for CMR collections (optional, from available_variables)
+        """
+        if selected_variable:
+            _state["selected_variable"] = selected_variable
+
+        stac_result = _state.get("stac_result")
+        items = (
+            [{"url": item.asset_url, "id": item.id, "datetime": item.datetime}
+             for item in stac_result.items if item.asset_url]
+            if stac_result else None
+        )
+
+        result = await _viz_tool._arun(VizToolInputSchema(
+            items=items,
+            collection_id=_state.get("selected_collection_id"),
+            collection_metadata=_state.get("collection_metadata"),
+            datetime_range=_state.get("datetime_range"),
+            selected_variable=_state.get("selected_variable"),
+        ))
+        _state["viz_result"] = result
+        return result.model_dump()
+
+    return [set_datetime_tool, get_place_tool, collections_rag_tool, stac_search_tool, stats_tool, viz_tool]
+
+
+def get_default_eie_tools() -> list[OpenAITool]:
+    """All 6 EIE tools running locally with shared state. No MCP server needed."""
+    return list(_make_local_tools())
 
 
 class EIEAgentConfig(OpenAIBaseAgentConfig):
@@ -165,7 +352,7 @@ class EIEAgentConfig(OpenAIBaseAgentConfig):
     )
     system_prompt: str = Field(default=EIE_AGENT_SYSTEM_PROMPT)
     model_name: str = Field(default="gpt-5.2")
-    reasoning_effort: Literal["low", "medium", "high"] | None = Field(default=None)
+    reasoning_effort: Literal["low", "medium", "high"] | None = Field(default="low")
     tools: list[Any] = Field(default_factory=get_default_eie_tools)
 
 

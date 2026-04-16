@@ -10,6 +10,7 @@ from loguru import logger
 from pydantic import Field
 
 from akd_ext.mcp import mcp_tool
+from akd_ext.tools.utils import fetch_collection_metadata, is_cmr_backed
 
 
 class CollectionsRAGToolConfig(BaseToolConfig):
@@ -22,24 +23,34 @@ class CollectionsRAGToolConfig(BaseToolConfig):
         ),
         description="Base URL for the collections RAG service",
     )
+    veda_api_root: str = Field(
+        default=os.getenv("VEDA_API_ROOT", "https://dev.openveda.cloud/api"),
+        description="VEDA API root (used to fetch full collection metadata for enrichment)",
+    )
+
+    @property
+    def stac_url(self) -> str:
+        """STAC API URL derived from veda_api_root."""
+        return f"{self.veda_api_root.rstrip('/')}/stac"
 
 
-class CollectionMatch(OutputSchema):
-    """A single collection match with extent metadata."""
+class CollectionMatchInfo(OutputSchema):
+    """A single collection match with enriched metadata."""
 
     id: str = Field(..., description="Collection ID")
     title: str | None = Field(None, description="Collection title")
     description: str | None = Field(None, description="Collection description")
-    collection_concept_id: str | None = Field(None, description="CMR concept ID")
-    spatial_bbox: list[list[float]] | None = Field(None, description="Spatial bounding boxes")
-    temporal_interval: list[list[str | None]] | None = Field(None, description="Temporal intervals")
-    spatial_overlap: bool = Field(..., description="Whether the collection spatially overlaps the query bbox")
-    temporal_overlap: bool = Field(..., description="Whether the collection temporally overlaps the query range")
+    spatial_overlap: bool = Field(default=False, description="Whether the collection spatially overlaps the query bbox")
+    temporal_overlap: bool = Field(default=False, description="Whether the collection temporally overlaps the query range")
     cosine_distance: float | None = Field(None, description="Cosine distance from query (None for CMR results)")
     cosine_similarity: float | None = Field(None, description="Cosine similarity to query (None for CMR results)")
-    source: str = Field(..., description="Result source: 'veda' or 'cmr'")
+    source: str = Field(default="veda", description="Result source: 'veda' or 'cmr'")
     cmr_rank: int | None = Field(None, description="Position in CMR results (None for VEDA)")
     time_density: str | None = Field(None, description="Temporal density: 'day', 'month', 'year', or None")
+    is_cmr_backed: bool = Field(False, description="True if collection data is accessed via CMR (has collection_concept_id)")
+    concept_id: str | None = Field(None, description="CMR collection_concept_id if is_cmr_backed=True")
+    available_variables: list[str] = Field(default_factory=list, description="Available renderable variables for CMR collections (from renders keys)")
+    collection_metadata: dict | None = Field(None, exclude=True, description="Full STAC collection JSON (excluded from serialization)")
 
 
 class CollectionsRAGToolInputSchema(InputSchema):
@@ -55,14 +66,16 @@ class CollectionsRAGToolInputSchema(InputSchema):
     )
 
 
-class CollectionsRAGToolOutputSchema(OutputSchema):
-    """Output schema for collections RAG search."""
+class CollectionsResult(OutputSchema):
+    """Result from collections search — matches eie-llm-backend's CollectionsResult."""
 
-    matches: list[CollectionMatch] = Field(..., description="Ranked collection matches")
+    collections: list[str] = Field(default_factory=list, description="Matched collection IDs")
+    matches: list[CollectionMatchInfo] = Field(default_factory=list, description="Detailed match info with coverage")
+    error: str | None = Field(default=None, description="Error message if search failed")
 
 
 @mcp_tool
-class CollectionsRAGTool(BaseTool[CollectionsRAGToolInputSchema, CollectionsRAGToolOutputSchema]):
+class CollectionsRAGTool(BaseTool[CollectionsRAGToolInputSchema, CollectionsResult]):
     """
     Search for relevant STAC collections using semantic similarity.
 
@@ -89,10 +102,10 @@ class CollectionsRAGTool(BaseTool[CollectionsRAGToolInputSchema, CollectionsRAGT
     """
 
     input_schema = CollectionsRAGToolInputSchema
-    output_schema = CollectionsRAGToolOutputSchema
+    output_schema = CollectionsResult
     config_schema = CollectionsRAGToolConfig
 
-    async def _arun(self, params: CollectionsRAGToolInputSchema) -> CollectionsRAGToolOutputSchema:
+    async def _arun(self, params: CollectionsRAGToolInputSchema) -> CollectionsResult:
         """Execute collections search via the external RAG service."""
         url = f"{self.config.base_url.rstrip('/')}/agent/search/collections"
 
@@ -119,8 +132,36 @@ class CollectionsRAGTool(BaseTool[CollectionsRAGToolInputSchema, CollectionsRAGT
                 msg = f"Collections RAG service returned {e.response.status_code}: {e.response.text}"
                 raise RuntimeError(msg) from e
 
-        matches = [CollectionMatch(**item) for item in data]
+        # Enrich each match with full metadata (is_cmr_backed, concept_id, available_variables)
+        # Mirrors eie-llm-backend's injected_tools.py enrichment step.
+        auxiliary_suffixes = ("_cnt", "_cond", "Error", "_error")
+        enriched_matches = []
+        for item in data:
+            coll_metadata = fetch_collection_metadata(item["id"], self.config.stac_url)
+            cmr_backed = is_cmr_backed(coll_metadata)
+            concept_id = coll_metadata.get("collection_concept_id") if coll_metadata and cmr_backed else None
 
-        logger.debug(f"Collections RAG returned {len(matches)} matches")
+            available_variables: list[str] = []
+            if cmr_backed and coll_metadata:
+                renders = coll_metadata.get("renders", {})
+                available_variables = [
+                    v for v in renders.keys()
+                    if not any(s in v for s in auxiliary_suffixes)
+                ]
 
-        return CollectionsRAGToolOutputSchema(matches=matches)
+            enriched_matches.append(
+                CollectionMatchInfo(
+                    **item,
+                    is_cmr_backed=cmr_backed,
+                    concept_id=concept_id,
+                    available_variables=available_variables,
+                    collection_metadata=coll_metadata,
+                )
+            )
+
+        logger.debug(f"Collections RAG returned {len(enriched_matches)} matches (enriched)")
+
+        return CollectionsResult(
+            collections=[m.id for m in enriched_matches],
+            matches=enriched_matches,
+        )
