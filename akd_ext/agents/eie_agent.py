@@ -291,13 +291,16 @@ def _make_local_tools() -> list:
             if stac_result else None
         )
 
-        logger.info(f"Geometry passed to stats tool: {place_result.geometry}")
+        # Only pass collection_metadata for CMR collections — VEDA uses items path
+        collection_metadata = _state.get("collection_metadata")
+        if collection_metadata and not is_cmr_backed(collection_metadata):
+            collection_metadata = None
 
         result = await _stats_tool._arun(StatsToolInputSchema(
             geometry=place_result.geometry,
             items=items,
             collection_id=_state.get("selected_collection_id"),
-            collection_metadata=_state.get("collection_metadata"),
+            collection_metadata=collection_metadata,
             datetime_range=_state.get("datetime_range"),
             selected_variable=_state.get("selected_variable"),
         ))
@@ -323,10 +326,15 @@ def _make_local_tools() -> list:
             if stac_result else None
         )
 
+        # Only pass collection_metadata for CMR collections
+        collection_metadata = _state.get("collection_metadata")
+        if collection_metadata and not is_cmr_backed(collection_metadata):
+            collection_metadata = None
+
         result = await _viz_tool._arun(VizToolInputSchema(
             items=items,
             collection_id=_state.get("selected_collection_id"),
-            collection_metadata=_state.get("collection_metadata"),
+            collection_metadata=collection_metadata,
             datetime_range=_state.get("datetime_range"),
             selected_variable=_state.get("selected_variable"),
         ))
