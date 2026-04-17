@@ -55,7 +55,7 @@ from .collections_rag import (
     CollectionsRAGTool,
     CollectionsRAGToolConfig,
     CollectionsRAGToolInputSchema,
-    CollectionsResult,
+    CollectionsRAGToolOutputSchema,
 )
 
 __all__ = [
@@ -97,7 +97,7 @@ __all__ = [
     "GetPlaceToolOutputSchema",
     "CollectionsRAGTool",
     "CollectionsRAGToolInputSchema",
-    "CollectionsResult",
+    "CollectionsRAGToolOutputSchema",
     "CollectionsRAGToolConfig",
     "CollectionMatchInfo",
 ]

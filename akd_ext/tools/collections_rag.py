@@ -24,7 +24,7 @@ class CollectionsRAGToolConfig(BaseToolConfig):
         description="Base URL for the collections RAG service",
     )
     veda_api_root: str = Field(
-        default=os.getenv("VEDA_API_ROOT", "https://dev.openveda.cloud/api"),
+        default=os.getenv("VEDA_API_ROOT", "https://earth.gov/ghgcenter/api"),
         description="VEDA API root (used to fetch full collection metadata for enrichment)",
     )
 
@@ -66,7 +66,7 @@ class CollectionsRAGToolInputSchema(InputSchema):
     )
 
 
-class CollectionsResult(OutputSchema):
+class CollectionsRAGToolOutputSchema(OutputSchema):
     """Result from collections search — matches eie-llm-backend's CollectionsResult."""
 
     collections: list[str] = Field(default_factory=list, description="Matched collection IDs")
@@ -75,7 +75,7 @@ class CollectionsResult(OutputSchema):
 
 
 @mcp_tool
-class CollectionsRAGTool(BaseTool[CollectionsRAGToolInputSchema, CollectionsResult]):
+class CollectionsRAGTool(BaseTool[CollectionsRAGToolInputSchema, CollectionsRAGToolOutputSchema]):
     """
     Search for relevant STAC collections using semantic similarity.
 
@@ -102,10 +102,10 @@ class CollectionsRAGTool(BaseTool[CollectionsRAGToolInputSchema, CollectionsResu
     """
 
     input_schema = CollectionsRAGToolInputSchema
-    output_schema = CollectionsResult
+    output_schema = CollectionsRAGToolOutputSchema
     config_schema = CollectionsRAGToolConfig
 
-    async def _arun(self, params: CollectionsRAGToolInputSchema) -> CollectionsResult:
+    async def _arun(self, params: CollectionsRAGToolInputSchema) -> CollectionsRAGToolOutputSchema:
         """Execute collections search via the external RAG service."""
         url = f"{self.config.base_url.rstrip('/')}/agent/search/collections"
 
@@ -161,7 +161,7 @@ class CollectionsRAGTool(BaseTool[CollectionsRAGToolInputSchema, CollectionsResu
 
         logger.debug(f"Collections RAG returned {len(enriched_matches)} matches (enriched)")
 
-        return CollectionsResult(
+        return CollectionsRAGToolOutputSchema(
             collections=[m.id for m in enriched_matches],
             matches=enriched_matches,
         )

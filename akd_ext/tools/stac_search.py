@@ -15,7 +15,7 @@ from pystac_client import Client
 
 from akd_ext.mcp import mcp_tool
 
-DEFAULT_STAC_URL = "https://dev.openveda.cloud/api/stac"
+DEFAULT_STAC_URL = "https://earth.gov/ghgcenter/api/stac"
 
 
 class STACSearchToolConfig(BaseToolConfig):

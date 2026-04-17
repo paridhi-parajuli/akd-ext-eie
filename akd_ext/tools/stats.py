@@ -16,11 +16,11 @@ class StatsToolConfig(BaseToolConfig):
     """Configuration for the Statistics Tool."""
 
     veda_api_root: str = Field(
-        default=os.getenv("VEDA_API_ROOT", "https://dev.openveda.cloud/api"),
+        default=os.getenv("VEDA_API_ROOT", "https://earth.gov/ghgcenter/api"),
         description="VEDA API root (base URL for STAC and raster APIs)",
     )
     titiler_cmr_url: str = Field(
-        default=os.getenv("TITILER_CMR_URL", "https://staging.openveda.cloud/api/titiler-cmr"),
+        default=os.getenv("TITILER_CMR_URL", "https://earth.gov/ghgcenter/api/titiler-cmr"),
         description="Base URL for the titiler-cmr service",
     )
     dst_crs: str = Field(
