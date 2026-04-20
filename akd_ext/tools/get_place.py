@@ -52,7 +52,7 @@ class GetPlaceToolConfig(BaseToolConfig):
     """Configuration for the GetPlace Tool."""
 
     geodini_host: str = Field(
-        default=os.getenv("GEODINI_HOST", ""),
+        default=os.getenv("GEODINI_HOST", "http://k8s-eiellm-eiellmng-3bfff7cd13-5b11596fb1756b2e.elb.us-west-2.amazonaws.com/geodini"),
         description="Base URL for the Geodini geocoding service",
     )
     timeout: float = Field(
