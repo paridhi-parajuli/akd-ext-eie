@@ -341,15 +341,34 @@ def _make_local_tools(state: dict[str, Any]) -> list:
             collection_id: The collection ID chosen by the user
             selected_variable: Variable name for CMR collections with multiple variables (optional)
         """
+        # Validate collection_id against known matches
+        collections_result = _state.get("collections_result") or {}
+        matches = collections_result.get("matches", [])
+        valid_ids = [m.get("id") for m in matches]
+
+        if collection_id not in valid_ids:
+            return json.dumps({
+                "error": f"Invalid collection '{collection_id}'. Valid options: {valid_ids}",
+                "selected_collection_id": None,
+                "selected_variable": None,
+            })
+
         _state["selected_collection_id"] = collection_id
         if selected_variable:
             _state["selected_variable"] = selected_variable
 
         # Look up collection_metadata from rag results
-        collections_result = _state.get("collections_result") or {}
-        for m in collections_result.get("matches", []):
+        for m in matches:
             if m.get("id") == collection_id:
                 _state["collection_metadata"] = m.get("collection_metadata")
+                # Validate selected_variable for CMR collections
+                available_vars = m.get("available_variables") or []
+                if selected_variable and available_vars and selected_variable not in available_vars:
+                    return json.dumps({
+                        "error": f"Invalid variable '{selected_variable}'. Valid options: {available_vars}",
+                        "selected_collection_id": collection_id,
+                        "selected_variable": None,
+                    })
                 break
 
         return json.dumps({
