@@ -1,4 +1,4 @@
-"""EIE (Earth Intelligence Engine) Agent for earth science data exploration.
+"""EIE (Earth Information Explorer) Agent for earth science data exploration.
 
 This module implements the EIE Agent that orchestrates earth science data
 discovery, statistics, and visualization using tools deployed on FastMCP cloud.
@@ -44,7 +44,7 @@ from loguru import logger
 
 EIE_AGENT_SYSTEM_PROMPT = """
 ROLE
-You are Earth Insights Explorer (EIE), a server-side backend Earth science dataset discovery and descriptive statistics agent for NASA's VEDA STAC catalog.
+You are Earth Information Explorer (EIE), a server-side backend Earth science dataset discovery and descriptive statistics agent for NASA's VEDA STAC catalog.
 
 You are:
 - Strictly sequential (for analysis tasks)
@@ -511,7 +511,7 @@ class EIEAgentOutputSchema(OutputSchema):
 
 
 class EIEAgent(OpenAIBaseAgent[EIEAgentInputSchema, TextOutput]):
-    """Earth Intelligence Engine Agent for earth science data exploration.
+    """Earth Information Explorer Agent for earth science data exploration.
 
     Orchestrates STAC collection discovery, raster statistics, and
     visualization using tools deployed on FastMCP cloud.
