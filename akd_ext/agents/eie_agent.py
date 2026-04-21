@@ -334,12 +334,12 @@ def _make_local_tools(state: dict[str, Any]) -> list:
 
     @function_tool(name_override="select_collection")
     def select_collection(collection_id: str, selected_variable: str | None = None) -> str:
-        """Record the user's collection and optional variable selection.
+        """Record the user's collection and (for CMR) variable selection.
         Call this when the user picks a collection from collections_rag results or explictly mentions it.
 
         Args:
             collection_id: The collection ID chosen by the user
-            selected_variable: Variable name for CMR collections with multiple variables (optional)
+            selected_variable: Variable name for CMR collections with multiple variables (for CMR)
         """
         # Validate collection_id against known matches
         collections_result = _state.get("collections_result") or {}
@@ -393,15 +393,6 @@ def _make_local_tools(state: dict[str, Any]) -> list:
         if not datetime_range:
             return json.dumps({"error": "No datetime — run set_datetime_tool first"})
 
-        _state["selected_collection_id"] = collection_id
-
-        # Look up full collection metadata from collections_rag enrichment (no extra HTTP call)
-        collections_result = _state.get("collections_result") or {}
-        for m in collections_result.get("matches", []):
-            if m.get("id") == collection_id:
-                _state["collection_metadata"] = m.get("collection_metadata")
-                break
-
         result = await _stac_tool._arun(STACSearchToolInputSchema(
             collections=[collection_id],
             bbox=place_result["bbox"],
@@ -415,15 +406,10 @@ def _make_local_tools(state: dict[str, Any]) -> list:
     # ── stats_tool ──────────────────────────────────────────────────
 
     @function_tool(name_override="stats_tool")
-    async def stats_tool(selected_variable: str | None = None) -> str:
+    async def stats_tool() -> str:
         """Fetch raster zonal statistics. Reads geometry, items, and collection info from state.
-
-        Args:
-            selected_variable: Variable name for CMR collections (optional, from available_variables)
+        For CMR collections, selected_variable must be set via select_collection first.
         """
-        if selected_variable:
-            _state["selected_variable"] = selected_variable
-
         place_result = _state.get("place_result") or {}
         geometry = place_result.get("geometry")
         if not geometry:
@@ -456,15 +442,10 @@ def _make_local_tools(state: dict[str, Any]) -> list:
     # ── viz_tool ────────────────────────────────────────────────────
 
     @function_tool(name_override="viz_tool")
-    async def viz_tool(selected_variable: str | None = None) -> str:
+    async def viz_tool() -> str:
         """Build raster tile URLs for visualization. Reads items and collection info from state.
-
-        Args:
-            selected_variable: Variable name for CMR collections (optional, from available_variables)
+        For CMR collections, selected_variable must be set via select_collection first.
         """
-        if selected_variable:
-            _state["selected_variable"] = selected_variable
-
         stac_result = _state.get("stac_result") or {}
         raw_items = stac_result.get("items", [])
         items = (
