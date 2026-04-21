@@ -9,7 +9,7 @@ from loguru import logger
 from pydantic import Field
 
 from akd_ext.mcp import mcp_tool
-from akd_ext.tools.utils import fetch_cmr_statistics, fetch_collection_metadata, fetch_statistics_batch
+from akd_ext.tools.utils import fetch_cmr_statistics, fetch_collection_metadata, fetch_statistics_batch, is_cmr_backed
 
 
 class StatsToolConfig(BaseToolConfig):
@@ -145,8 +145,8 @@ class StatsTool(BaseTool[StatsToolInputSchema, StatsToolOutputSchema]):
                     error=f"Could not fetch metadata for collection '{params.collection_id}'"
                 )
 
-        # CMR path: collection_metadata provided (or auto-fetched)
-        if collection_metadata is not None:
+        # CMR path: collection is CMR-backed (has collection_concept_id)
+        if collection_metadata is not None and is_cmr_backed(collection_metadata):
             if not params.datetime_range:
                 return StatsToolOutputSchema(
                     error="datetime_range is required when using collection_metadata (CMR path)"
