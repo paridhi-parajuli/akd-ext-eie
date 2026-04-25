@@ -81,29 +81,59 @@ You must orchestrate tools in this mandatory order:
 - set_datetime(value): Validate and set a datetime range.
   Input: ISO-8601 range string (YYYY-MM-DD/YYYY-MM-DD). LLM converts user temporal phrasing before calling (e.g., "Oct to Dec 2021" → "2021-10-01/2021-12-31"). Use current date for relative time parsing ("last month", "summer 2022").
   The tool validates the format:
-    - If invalid → returns error message; LLM should adjust and retry
-    - If valid → triggers user confirmation prompt
-  Output: Validation result and pending confirmation state.
+    - If invalid → returns status='error' with message; LLM should adjust and retry
+    - If valid → returns status='pending_confirmation' with datetime and message
+  Output includes: status ('pending_confirmation', 'error'), datetime, message.
   A valid interval is required for STAC item retrieval and downstream analysis.
   If the user intent is dataset discovery only, datetime may be omitted until analysis begins.
+  
+  IMPORTANT: When status='pending_confirmation', present the date range to the user and wait for confirmation.
+  Do NOT proceed to other tools until the user confirms the date range.
 
 - get_place(query): Resolve a place name to bbox AND GeoJSON geometry via GeoDini.
   Input: place query string
-  Output: PlaceResult with fields: place, bbox, geometry, error.
+  Output: PlaceResult with fields:
+    - status: 'pending_confirmation' or 'error'
+    - place: resolved place name
+    - bbox: [west, south, east, north]
+    - geometry: GeoJSON geometry
+    - message
+    - error (if any)
   Call this when spatial filtering is required for STAC search.
   For dataset discovery queries, AOI may be deferred.
-  The user will be prompted to confirm the location automatically.
+  
+  IMPORTANT: When status='pending_confirmation', present the resolved location to the user and wait for confirmation.
+  Do NOT proceed to other tools until the user confirms the location.
 
 - collections_rag(query): Search top-K STAC collections via semantic similarity (RAG).
   Input: query (data description like 'NO2 air quality')
   Output: Top-K (default 5) collections with:
+    - status: 'complete', 'pending_confirmation', or 'error'
     - cosine_similarity
     - cosine_distance
     - spatial_overlap (bool)
     - temporal_overlap (bool)
     - is_cmr_backed (bool)
     - available_variables (list, for CMR collections)
-  The user will be prompted to select a collection automatically (and a variable, if the collection is CMR-backed with multiple variables).
+    - options (list, when status='pending_confirmation')
+    - message
+  
+  IMPORTANT: When status='pending_confirmation', present the collection options to the user and wait for selection.
+  Do NOT call select_collection until the user explicitly chooses a collection.
+
+- select_collection(collection_id, selected_variable): Record user's collection and variable selection.
+  Output includes: status ('complete', 'pending_confirmation', 'error'), selected_collection_id, selected_variable, options, message.
+  
+  IMPORTANT: When status='pending_confirmation' (CMR collection with multiple variables), present the variable options to the user and wait for selection.
+  Do NOT proceed to stats/viz until the user selects a variable.
+
+CONFIRMATION GATE RULE:
+When ANY tool returns status='pending_confirmation', you MUST:
+1. Output the message field EXACTLY as provided — do NOT rephrase, summarize, or add extra text
+2. If options are provided, list them exactly as given
+3. STOP and wait for user input
+4. Do NOT call any other tools until the user responds
+5. Do NOT add your own confirmation prompts like "Please confirm" or "Is this correct?" — the message already contains this
 
 - stac_search(): Search STAC catalog for COG items.
   Reads selected_collection_id from state. No arguments needed.
@@ -277,9 +307,19 @@ def _make_local_tools(state: dict[str, Any]) -> list:
             value: ISO-8601 range 'YYYY-MM-DD/YYYY-MM-DD'
         """
         result = await _datetime_tool._arun(SetDatetimeToolInputSchema(value=value))
-        if result.datetime:
+
+        # Build response with confirmation status
+        result_dict = result.model_dump()
+
+        if result.error:
+            result_dict["status"] = "error"
+            result_dict["message"] = result.error
+        elif result.datetime:
             _state["datetime_range"] = result.datetime
-        return result.model_dump_json()
+            result_dict["status"] = "pending_confirmation"
+            result_dict["message"] = f"Date range set to {result.datetime}. Please confirm this is correct."
+
+        return json.dumps(result_dict)
 
     # ── get_place_tool ──────────────────────────────────────────────
 
@@ -304,10 +344,23 @@ def _make_local_tools(state: dict[str, Any]) -> list:
                 "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]],
             }
 
+        # Build response with confirmation status
+        if result.error:
+            status = "error"
+            message = result.error
+        elif result.place:
+            status = "pending_confirmation"
+            message = f"Location resolved to '{result.place}'. Please see the map and confirm this is the correct area."
+        else:
+            status = "error"
+            message = "Could not resolve location."
+
         return json.dumps({
+            "status": status,
             "place": result.place,
             "bbox": result.bbox,
             "geometry": bbox_geom,
+            "message": message,
             "error": result.error,
         })
 
@@ -329,19 +382,42 @@ def _make_local_tools(state: dict[str, Any]) -> list:
             bbox=place_result.get("bbox"),
             datetime_range=_state.get("datetime_range"),
         ))
-        _state["collections_result"] = result.model_dump()
-        return result.model_dump_json()
+
+        # Build response with confirmation status
+        result_dict = result.model_dump()
+        matches = result_dict.get("matches", [])
+
+        if len(matches) == 0:
+            result_dict["status"] = "error"
+            result_dict["message"] = "No matching collections found for your query."
+        elif len(matches) == 1:
+            result_dict["status"] = "complete"
+            result_dict["message"] = f"Found 1 matching collection: {matches[0].get('title', matches[0].get('id'))}"
+        else:
+            result_dict["status"] = "pending_confirmation"
+            result_dict["message"] = f"Found {len(matches)} matching collections. Please select one."
+            result_dict["options"] = [
+                {
+                    "id": m.get("id"),
+                    "label": m.get("title") or m.get("id"),
+                    "description": m.get("description", "")[:100] if m.get("description") else None,
+                }
+                for m in matches
+            ]
+
+        _state["collections_result"] = result_dict
+        return json.dumps(result_dict)
 
     # ── select_collection ───────────────────────────────────────────
 
     @function_tool(name_override="select_collection")
     def select_collection(collection_id: str, selected_variable: str | None = None) -> str:
-        """Record the user's collection and (for CMR) variable selection.
+        """Record the user's collection and optional variable selection.
         Call this when the user picks a collection from collections_rag results or explictly mentions it.
 
         Args:
             collection_id: The collection ID chosen by the user
-            selected_variable: Variable name for CMR collections with multiple variables (for CMR)
+            selected_variable: Variable name for CMR collections with multiple variables (optional)
         """
         # Validate collection_id against known matches
         collections_result = _state.get("collections_result") or {}
@@ -350,30 +426,57 @@ def _make_local_tools(state: dict[str, Any]) -> list:
 
         if collection_id not in valid_ids:
             return json.dumps({
+                "status": "error",
                 "error": f"Invalid collection '{collection_id}'. Valid options: {valid_ids}",
                 "selected_collection_id": None,
                 "selected_variable": None,
             })
 
         _state["selected_collection_id"] = collection_id
-        if selected_variable:
-            _state["selected_variable"] = selected_variable
 
         # Look up collection_metadata from rag results
+        collection_title = collection_id
+        available_vars = []
+        is_cmr = False
         for m in matches:
             if m.get("id") == collection_id:
                 _state["collection_metadata"] = m.get("collection_metadata")
-                # Validate selected_variable for CMR collections
+                collection_title = m.get("title") or collection_id
                 available_vars = m.get("available_variables") or []
+                is_cmr = m.get("is_cmr_backed", False)
+
+                # Validate selected_variable for CMR collections
                 if selected_variable and available_vars and selected_variable not in available_vars:
                     return json.dumps({
+                        "status": "error",
                         "error": f"Invalid variable '{selected_variable}'. Valid options: {available_vars}",
                         "selected_collection_id": collection_id,
                         "selected_variable": None,
                     })
                 break
 
+        # Handle CMR variable selection
+        if is_cmr and available_vars:
+            if len(available_vars) == 1 and not selected_variable:
+                # Auto-select the only variable
+                selected_variable = available_vars[0]
+            elif len(available_vars) > 1 and not selected_variable:
+                # Multiple variables - request user selection
+                return json.dumps({
+                    "status": "pending_confirmation",
+                    "message": f"Collection '{collection_title}' has multiple variables. Please select one.",
+                    "selected_collection_id": collection_id,
+                    "selected_variable": None,
+                    "options": [{"id": v, "label": v} for v in available_vars],
+                })
+
+        # Store variable if provided or auto-selected
+        if selected_variable:
+            _state["selected_variable"] = selected_variable
+
         return json.dumps({
+            "status": "complete",
+            "message": f"Selected collection '{collection_title}'" + (f" with variable '{selected_variable}'" if selected_variable else ""),
             "selected_collection_id": collection_id,
             "selected_variable": selected_variable,
         })
