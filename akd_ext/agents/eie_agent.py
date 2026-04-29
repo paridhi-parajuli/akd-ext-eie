@@ -393,11 +393,19 @@ def _make_local_tools(state: dict[str, Any]) -> list:
 
         # Build response with confirmation status
         result_dict = result.model_dump()
-        matches = result_dict.get("matches", [])
+        all_matches = result_dict.get("matches", [])
+
+        # Filter to only include collections with both spatial and temporal overlap
+        matches = [
+            m for m in all_matches
+            if m.get("spatial_overlap") is True and m.get("temporal_overlap") is True
+        ]
+        result_dict["matches"] = matches
+        result_dict["collections"] = [m.get("id") for m in matches]
 
         if len(matches) == 0:
             result_dict["status"] = "error"
-            result_dict["message"] = "No matching collections found for your query."
+            result_dict["message"] = "No matching collections found with both spatial and temporal overlap for your query."
         elif len(matches) == 1:
             result_dict["status"] = "complete"
             result_dict["message"] = f"Found 1 matching collection: {matches[0].get('title', matches[0].get('id'))}"
