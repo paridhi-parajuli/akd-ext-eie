@@ -127,9 +127,9 @@ You must orchestrate tools in this mandatory order:
     - message
   
   IMPORTANT: When status='pending_confirmation', present the collection options to the user and wait for selection.
-  Do NOT call select_collection until the user explicitly chooses a collection.
+  Do NOT call select_collection_tool until the user explicitly chooses a collection.
 
-- select_collection(collection_id, selected_variable): Record user's collection and variable selection.
+- select_collection_tool(collection_id, selected_variable): Record user's collection and variable selection.
   Output includes: status ('complete', 'pending_confirmation', 'error'), selected_collection_id, selected_variable, options, message.
   
   IMPORTANT: When status='pending_confirmation' (CMR collection with multiple variables), present the variable options to the user and wait for selection.
@@ -225,7 +225,7 @@ Once the user proceeds to analysis, all required prior steps must be completed b
 
 0. Query interpretation
    Extract: topic, time (if any), place (if any), collection_id (if any)
-   If the user provides a collection_id directly, call select_collection(collection_id=...) immediately to record it.
+   If the user provides a collection_id directly, call select_collection_tool(collection_id=...) immediately to record it.
    If discovery intent → skip to Collection Discovery
 
 1. Datetime gate (analysis only)
@@ -243,8 +243,8 @@ Once the user proceeds to analysis, all required prior steps must be completed b
    If no collections have both spatial and temporal overlap, explain which matched thematically but why they don't cover the requested extent.
 
 4. Dataset selection
-   User must choose. When the user selects a collection, you MUST call select_collection(collection_id=...) to record it.
-   For CMR collections with multiple variables, also pass selected_variable to select_collection.
+   User must choose. When the user selects a collection, you MUST call select_collection_tool(collection_id=...) to record it.
+   For CMR collections with multiple variables, also pass selected_variable to select_collection_tool.
 
 5. STAC search
    If 0 items → halt and explain no data available
@@ -429,10 +429,10 @@ def _make_local_tools(state: dict[str, Any]) -> list:
         _state["collections_result"] = result_dict
         return json.dumps(result_dict)
 
-    # ── select_collection ───────────────────────────────────────────
+    # ── select_collection_tool ───────────────────────────────────────────
 
-    @function_tool(name_override="select_collection")
-    def select_collection(collection_id: str, selected_variable: str | None = None) -> str:
+    @function_tool(name_override="select_collection_tool")
+    def select_collection_tool(collection_id: str, selected_variable: str | None = None) -> str:
         """Record the user's collection and optional variable selection.
         Call this when the user picks a collection from collections_rag results or explictly mentions it.
 
@@ -545,7 +545,7 @@ def _make_local_tools(state: dict[str, Any]) -> list:
     @function_tool(name_override="stats_tool")
     async def stats_tool() -> str:
         """Fetch raster zonal statistics. Reads geometry, items, and collection info from state.
-        For CMR collections, selected_variable must be set via select_collection first.
+        For CMR collections, selected_variable must be set via select_collection_tool first.
         """
         place_result = _state.get("place_result") or {}
         geometry = place_result.get("geometry")
@@ -592,7 +592,7 @@ def _make_local_tools(state: dict[str, Any]) -> list:
     @function_tool(name_override="viz_tool")
     async def viz_tool() -> str:
         """Build raster tile URLs for visualization. Reads items and collection info from state.
-        For CMR collections, selected_variable must be set via select_collection first.
+        For CMR collections, selected_variable must be set via select_collection_tool first.
         """
         stac_result = _state.get("stac_result") or {}
         raw_items = stac_result.get("items", [])
@@ -628,7 +628,7 @@ def _make_local_tools(state: dict[str, Any]) -> list:
 
         return json.dumps(result_dict)
 
-    return [set_datetime_tool, get_place_tool, collections_rag_tool, select_collection, stac_search_tool, stats_tool, viz_tool]
+    return [set_datetime_tool, get_place_tool, collections_rag_tool, select_collection_tool, stac_search_tool, stats_tool, viz_tool]
 
 
 class EIEAgentConfig(OpenAIBaseAgentConfig):
