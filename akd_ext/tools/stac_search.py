@@ -6,6 +6,7 @@ returning matching items with their COG asset URLs and metadata.
 """
 
 import os
+from datetime import datetime, time, timezone
 
 from akd._base import InputSchema, OutputSchema
 from akd.tools import BaseTool, BaseToolConfig
@@ -15,7 +16,38 @@ from pystac_client import Client
 
 from akd_ext.mcp import mcp_tool
 
-DEFAULT_STAC_URL = "https://dev.openveda.cloud/api/stac"
+DEFAULT_STAC_URL = "https://earth.gov/ghgcenter/api/stac"
+
+
+def _normalize_datetime_range(dt_str: str) -> str:
+    """Normalize date-only ranges to full ISO-8601 UTC timestamps.
+    
+    For STAC APIs that don't handle date-only ranges well. Converts 
+    start_datetime/end_datetime for collections from '2021-06-01/2021-08-31' 
+    to full ISO-8601, e.g. '2021-06-01T00:00:00Z/2021-08-31T23:59:59Z'.
+    """
+    def _to_iso(s: str, end_of_day: bool = False) -> str:
+        s = s.strip().replace("Z", "+00:00")
+        if not s:
+            return s
+        # Already has time component - return as-is (assume valid ISO-8601)
+        if "T" in s:
+            return s
+        # Date-only: parse and add time
+        try:
+            dt = datetime.fromisoformat(s)
+            if end_of_day:
+                dt = datetime.combine(dt.date(), time(23, 59, 59), tzinfo=timezone.utc)
+            else:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        except ValueError:
+            return s
+
+    if "/" not in dt_str:
+        return _to_iso(dt_str)
+    start, end = dt_str.split("/", 1)
+    return f"{_to_iso(start)}/{_to_iso(end, end_of_day=True)}"
 
 
 class STACSearchToolConfig(BaseToolConfig):
@@ -127,17 +159,18 @@ class STACSearchTool(BaseTool[STACSearchToolInputSchema, STACSearchToolOutputSch
         client = Client.open(root, headers={"Accept": "application/json"})
 
         col = params.collections[0] if params.collections else None
+        normalized_dt = _normalize_datetime_range(params.datetime)
         logger.debug(
             f"STAC search: collection={col}, bbox={params.bbox}, "
-            f"datetime={params.datetime}, limit={params.limit}"
+            f"datetime={normalized_dt}, limit={params.limit}"
         )
-
         search = client.search(
             collections=[col] if col else None,
             bbox=params.bbox,
-            datetime=params.datetime,
+            datetime=normalized_dt,
             max_items=params.limit,
         )
+        logger.debug(f"STAC search params: {search.get_parameters()}")
 
         items: list[STACItem] = []
         for it in search.items():

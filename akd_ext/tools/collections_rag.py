@@ -24,7 +24,7 @@ class CollectionsRAGToolConfig(BaseToolConfig):
         description="Base URL for the collections RAG service",
     )
     veda_api_root: str = Field(
-        default=os.getenv("VEDA_API_ROOT", "https://dev.openveda.cloud/api"),
+        default=os.getenv("VEDA_API_ROOT", "https://earth.gov/ghgcenter/api"),
         description="VEDA API root (used to fetch full collection metadata for enrichment)",
     )
 
@@ -35,24 +35,22 @@ class CollectionsRAGToolConfig(BaseToolConfig):
 
 
 class CollectionMatchInfo(OutputSchema):
-    """A single collection match with extent metadata."""
+    """A single collection match with enriched metadata."""
 
     id: str = Field(..., description="Collection ID")
     title: str | None = Field(None, description="Collection title")
     description: str | None = Field(None, description="Collection description")
-    collection_concept_id: str | None = Field(None, description="CMR concept ID")
-    spatial_bbox: list[list[float]] | None = Field(None, description="Spatial bounding boxes")
-    temporal_interval: list[list[str | None]] | None = Field(None, description="Temporal intervals")
-    spatial_overlap: bool = Field(..., description="Whether the collection spatially overlaps the query bbox")
-    temporal_overlap: bool = Field(..., description="Whether the collection temporally overlaps the query range")
+    spatial_overlap: bool = Field(default=False, description="Whether the collection spatially overlaps the query bbox")
+    temporal_overlap: bool = Field(default=False, description="Whether the collection temporally overlaps the query range")
     cosine_distance: float | None = Field(None, description="Cosine distance from query (None for CMR results)")
     cosine_similarity: float | None = Field(None, description="Cosine similarity to query (None for CMR results)")
-    source: str = Field(..., description="Result source: 'veda' or 'cmr'")
+    source: str = Field(default="veda", description="Result source: 'veda' or 'cmr'")
     cmr_rank: int | None = Field(None, description="Position in CMR results (None for VEDA)")
     time_density: str | None = Field(None, description="Temporal density: 'day', 'month', 'year', or None")
-    is_cmr_backed: bool = Field(False, description="Whether this collection is accessed via titiler-cmr")
-    concept_id: str | None = Field(None, description="CMR collection_concept_id (if CMR-backed)")
-    available_variables: list[str] = Field(default_factory=list, description="Renderable variable names (CMR collections)")
+    is_cmr_backed: bool = Field(False, description="True if collection data is accessed via CMR (has collection_concept_id)")
+    concept_id: str | None = Field(None, description="CMR collection_concept_id if is_cmr_backed=True")
+    available_variables: list[str] = Field(default_factory=list, description="Available renderable variables for CMR collections (from renders keys)")
+    collection_metadata: dict | None = Field(None, exclude=True, description="Full STAC collection JSON (excluded from serialization)")
 
 
 class CollectionsRAGToolInputSchema(InputSchema):
@@ -69,7 +67,7 @@ class CollectionsRAGToolInputSchema(InputSchema):
 
 
 class CollectionsRAGToolOutputSchema(OutputSchema):
-    """Output schema for collections RAG search."""
+    """Result from collections search — matches eie-llm-backend's CollectionsResult."""
 
     collections: list[str] = Field(default_factory=list, description="Matched collection IDs")
     matches: list[CollectionMatchInfo] = Field(default_factory=list, description="Detailed match info with coverage")
@@ -140,8 +138,8 @@ class CollectionsRAGTool(BaseTool[CollectionsRAGToolInputSchema, CollectionsRAGT
         enriched_matches = []
         for item in data:
             coll_metadata = fetch_collection_metadata(item["id"], self.config.stac_url)
-            concept_id = coll_metadata.get("collection_concept_id") if coll_metadata else None
-            cmr_backed = bool(concept_id)
+            cmr_backed = is_cmr_backed(coll_metadata)
+            concept_id = coll_metadata.get("collection_concept_id") if coll_metadata and cmr_backed else None
 
             available_variables: list[str] = []
             if cmr_backed and coll_metadata:
@@ -157,6 +155,7 @@ class CollectionsRAGTool(BaseTool[CollectionsRAGToolInputSchema, CollectionsRAGT
                     is_cmr_backed=cmr_backed,
                     concept_id=concept_id,
                     available_variables=available_variables,
+                    collection_metadata=coll_metadata,
                 )
             )
 

@@ -21,6 +21,12 @@ from akd_ext.agents.pds_search_care import (
     PDSSearchConfig,
 )
 
+from akd_ext.agents.eie_agent import (
+    EIEAgent,
+    EIEAgentConfig,
+    EIEAgentInputSchema,
+    EIEAgentOutputSchema,
+)
 from akd_ext.agents.gap import (
     GapAgent,
     GapAgentConfig,
@@ -63,6 +69,10 @@ __all__ = [
     "CMRCareAgentInputSchema",
     "CMRCareAgentOutputSchema",
     "CMRCareConfig",
+    "EIEAgent",
+    "EIEAgentConfig",
+    "EIEAgentInputSchema",
+    "EIEAgentOutputSchema",
     "GapAgent",
     "GapAgentConfig",
     "GapAgentInputSchema",
