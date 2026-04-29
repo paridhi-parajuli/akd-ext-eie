@@ -143,6 +143,11 @@ When ANY tool returns status='pending_confirmation', you MUST:
 4. Do NOT call any other tools until the user responds
 5. Do NOT add your own confirmation prompts like "Please confirm" or "Is this correct?" — the message already contains this
 
+COMPLETE STATUS RULE:
+When ANY tool returns status='complete', you MUST:
+1. Output the message field EXACTLY as provided — do NOT rephrase, summarize, or add extra text
+2. You may proceed to the next tool in the pipeline
+
 - stac_search(): Search STAC catalog for COG items.
   Reads selected_collection_id from state. No arguments needed.
   Skip for CMR-backed collections (is_cmr_backed=true). Only required for VEDA COG collections before stats/viz.
@@ -522,7 +527,18 @@ def _make_local_tools(state: dict[str, Any]) -> list:
         ))
 
         _state["stac_result"] = result.model_dump()
-        return result.model_dump_json()
+
+        # Build response with status and message
+        result_dict = result.model_dump()
+        num_items = len(result_dict.get("items", []))
+        if num_items == 0:
+            result_dict["status"] = "error"
+            result_dict["message"] = "No STAC items found for the selected collection and filters."
+        else:
+            result_dict["status"] = "complete"
+            result_dict["message"] = f"Found {num_items} STAC item{'s' if num_items != 1 else ''}."
+
+        return json.dumps(result_dict)
 
     # ── stats_tool ──────────────────────────────────────────────────
 
@@ -558,7 +574,18 @@ def _make_local_tools(state: dict[str, Any]) -> list:
             selected_variable=_state.get("selected_variable"),
         ))
         _state["stats_result"] = result.model_dump()
-        return result.model_dump_json()
+
+        # Build response with status and message
+        result_dict = result.model_dump()
+        num_results = len(result_dict.get("results", []))
+        if num_results == 0:
+            result_dict["status"] = "error"
+            result_dict["message"] = "No statistics could be computed."
+        else:
+            result_dict["status"] = "complete"
+            result_dict["message"] = f"Statistics computed for {num_results} item{'s' if num_results != 1 else ''}."
+
+        return json.dumps(result_dict)
 
     # ── viz_tool ────────────────────────────────────────────────────
 
@@ -588,7 +615,18 @@ def _make_local_tools(state: dict[str, Any]) -> list:
             selected_variable=_state.get("selected_variable"),
         ))
         _state["viz_result"] = result.model_dump()
-        return result.model_dump_json()
+
+        # Build response with status and message
+        result_dict = result.model_dump()
+        num_items = len(result_dict.get("items", []))
+        if num_items == 0:
+            result_dict["status"] = "error"
+            result_dict["message"] = "No visualization layers could be generated."
+        else:
+            result_dict["status"] = "complete"
+            result_dict["message"] = f"Visualization layers generated for {num_items} item{'s' if num_items != 1 else ''}."
+
+        return json.dumps(result_dict)
 
     return [set_datetime_tool, get_place_tool, collections_rag_tool, select_collection, stac_search_tool, stats_tool, viz_tool]
 
