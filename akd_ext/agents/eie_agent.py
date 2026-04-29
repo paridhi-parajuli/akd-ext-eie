@@ -127,9 +127,9 @@ You must orchestrate tools in this mandatory order:
     - message
   
   IMPORTANT: When status='pending_confirmation', present the collection options to the user and wait for selection.
-  Do NOT call select_collection until the user explicitly chooses a collection.
+  Do NOT call select_collection_tool until the user explicitly chooses a collection.
 
-- select_collection(collection_id, selected_variable): Record user's collection and variable selection.
+- select_collection_tool(collection_id, selected_variable): Record user's collection and variable selection.
   Output includes: status ('complete', 'pending_confirmation', 'error'), selected_collection_id, selected_variable, options, message.
   
   IMPORTANT: When status='pending_confirmation' (CMR collection with multiple variables), present the variable options to the user and wait for selection.
@@ -142,6 +142,11 @@ When ANY tool returns status='pending_confirmation', you MUST:
 3. STOP and wait for user input
 4. Do NOT call any other tools until the user responds
 5. Do NOT add your own confirmation prompts like "Please confirm" or "Is this correct?" — the message already contains this
+
+COMPLETE STATUS RULE:
+When ANY tool returns status='complete', you MUST:
+1. Output the message field EXACTLY as provided — do NOT rephrase, summarize, or add extra text
+2. You may proceed to the next tool in the pipeline
 
 - stac_search(): Search STAC catalog for COG items.
   Reads selected_collection_id from state. No arguments needed.
@@ -220,7 +225,7 @@ Once the user proceeds to analysis, all required prior steps must be completed b
 
 0. Query interpretation
    Extract: topic, time (if any), place (if any), collection_id (if any)
-   If the user provides a collection_id directly, call select_collection(collection_id=...) immediately to record it.
+   If the user provides a collection_id directly, call select_collection_tool(collection_id=...) immediately to record it.
    If discovery intent → skip to Collection Discovery
 
 1. Datetime gate (analysis only)
@@ -238,8 +243,8 @@ Once the user proceeds to analysis, all required prior steps must be completed b
    If no collections have both spatial and temporal overlap, explain which matched thematically but why they don't cover the requested extent.
 
 4. Dataset selection
-   User must choose. When the user selects a collection, you MUST call select_collection(collection_id=...) to record it.
-   For CMR collections with multiple variables, also pass selected_variable to select_collection.
+   User must choose. When the user selects a collection, you MUST call select_collection_tool(collection_id=...) to record it.
+   For CMR collections with multiple variables, also pass selected_variable to select_collection_tool.
 
 5. STAC search
    If 0 items → halt and explain no data available
@@ -393,11 +398,19 @@ def _make_local_tools(state: dict[str, Any]) -> list:
 
         # Build response with confirmation status
         result_dict = result.model_dump()
-        matches = result_dict.get("matches", [])
+        all_matches = result_dict.get("matches", [])
+
+        # Filter to only include collections with both spatial and temporal overlap
+        matches = [
+            m for m in all_matches
+            if m.get("spatial_overlap") is True and m.get("temporal_overlap") is True
+        ]
+        result_dict["matches"] = matches
+        result_dict["collections"] = [m.get("id") for m in matches]
 
         if len(matches) == 0:
             result_dict["status"] = "error"
-            result_dict["message"] = "No matching collections found for your query."
+            result_dict["message"] = "No matching collections found with both spatial and temporal overlap for your query."
         elif len(matches) == 1:
             result_dict["status"] = "complete"
             result_dict["message"] = f"Found 1 matching collection: {matches[0].get('title', matches[0].get('id'))}"
@@ -416,10 +429,10 @@ def _make_local_tools(state: dict[str, Any]) -> list:
         _state["collections_result"] = result_dict
         return json.dumps(result_dict)
 
-    # ── select_collection ───────────────────────────────────────────
+    # ── select_collection_tool ───────────────────────────────────────────
 
-    @function_tool(name_override="select_collection")
-    def select_collection(collection_id: str, selected_variable: str | None = None) -> str:
+    @function_tool(name_override="select_collection_tool")
+    def select_collection_tool(collection_id: str, selected_variable: str | None = None) -> str:
         """Record the user's collection and optional variable selection.
         Call this when the user picks a collection from collections_rag results or explictly mentions it.
 
@@ -514,14 +527,25 @@ def _make_local_tools(state: dict[str, Any]) -> list:
         ))
 
         _state["stac_result"] = result.model_dump()
-        return result.model_dump_json()
+
+        # Build response with status and message
+        result_dict = result.model_dump()
+        num_items = len(result_dict.get("items", []))
+        if num_items == 0:
+            result_dict["status"] = "error"
+            result_dict["message"] = "No STAC items found for the selected collection and filters."
+        else:
+            result_dict["status"] = "complete"
+            result_dict["message"] = f"Found {num_items} STAC item{'s' if num_items != 1 else ''}."
+
+        return json.dumps(result_dict)
 
     # ── stats_tool ──────────────────────────────────────────────────
 
     @function_tool(name_override="stats_tool")
     async def stats_tool() -> str:
         """Fetch raster zonal statistics. Reads geometry, items, and collection info from state.
-        For CMR collections, selected_variable must be set via select_collection first.
+        For CMR collections, selected_variable must be set via select_collection_tool first.
         """
         place_result = _state.get("place_result") or {}
         geometry = place_result.get("geometry")
@@ -550,14 +574,25 @@ def _make_local_tools(state: dict[str, Any]) -> list:
             selected_variable=_state.get("selected_variable"),
         ))
         _state["stats_result"] = result.model_dump()
-        return result.model_dump_json()
+
+        # Build response with status and message
+        result_dict = result.model_dump()
+        num_results = len(result_dict.get("results", []))
+        if num_results == 0:
+            result_dict["status"] = "error"
+            result_dict["message"] = "No statistics could be computed."
+        else:
+            result_dict["status"] = "complete"
+            result_dict["message"] = f"Statistics computed for {num_results} item{'s' if num_results != 1 else ''}."
+
+        return json.dumps(result_dict)
 
     # ── viz_tool ────────────────────────────────────────────────────
 
     @function_tool(name_override="viz_tool")
     async def viz_tool() -> str:
         """Build raster tile URLs for visualization. Reads items and collection info from state.
-        For CMR collections, selected_variable must be set via select_collection first.
+        For CMR collections, selected_variable must be set via select_collection_tool first.
         """
         stac_result = _state.get("stac_result") or {}
         raw_items = stac_result.get("items", [])
@@ -580,9 +615,20 @@ def _make_local_tools(state: dict[str, Any]) -> list:
             selected_variable=_state.get("selected_variable"),
         ))
         _state["viz_result"] = result.model_dump()
-        return result.model_dump_json()
 
-    return [set_datetime_tool, get_place_tool, collections_rag_tool, select_collection, stac_search_tool, stats_tool, viz_tool]
+        # Build response with status and message
+        result_dict = result.model_dump()
+        num_items = len(result_dict.get("items", []))
+        if num_items == 0:
+            result_dict["status"] = "error"
+            result_dict["message"] = "No visualization layers could be generated."
+        else:
+            result_dict["status"] = "complete"
+            result_dict["message"] = f"Visualization layers generated for {num_items} item{'s' if num_items != 1 else ''}."
+
+        return json.dumps(result_dict)
+
+    return [set_datetime_tool, get_place_tool, collections_rag_tool, select_collection_tool, stac_search_tool, stats_tool, viz_tool]
 
 
 class EIEAgentConfig(OpenAIBaseAgentConfig):
